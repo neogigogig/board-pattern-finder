@@ -7,23 +7,29 @@ Specifically designed for data-qr-ratio-finder images with detailed 1:1:3:1:1 an
 import cv2
 import numpy as np
 import os
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import json
+from qr_data_reader import QRDataReader
 
 class EnhancedStrictQRDetector:
-    def __init__(self, ratio_tolerance=0.22):
+    def __init__(self, ratio_tolerance=0.22, width_height_ratio=1.0):
         """
         Enhanced Strict QR Finder Pattern Detector with optimized settings
         
         Args:
             ratio_tolerance: Tolerance for the 1:1:3:1:1 ratio (0.22 = 22% tolerance)
                            Optimized value providing good balance between precision and recall
+            width_height_ratio: Ratio of pattern width to height (1.0 for square, 1.5 for 3:2, etc.)
         """
         self.ratio_tolerance = ratio_tolerance
         self.min_pattern_size = 8  # Slightly smaller minimum
         self.max_pattern_size = 500
         self.strict_ratio_threshold = 0.6  # More lenient for edge cases
         self.debug_info = []
+        self.width_height_ratio = width_height_ratio
+        
+        # Initialize QR data reader for Phase 1 functionality with flexible ratio
+        self.qr_data_reader = QRDataReader(width_height_ratio=width_height_ratio)
         
     def reset_debug(self):
         """Reset debug information for new image"""
@@ -37,25 +43,22 @@ class EnhancedStrictQRDetector:
         })
     
     def is_circular_shape(self, contour) -> bool:
-        """Detect if a contour is circular - DISABLED for testing"""
-        # DISABLED: Anti-circular check removed to test impact on results
-        return False
+        """Detect if a contour is circular - RE-ENABLED"""
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
         
-        # Original code (disabled):
-        # area = cv2.contourArea(contour)
-        # perimeter = cv2.arcLength(contour, True)
-        # 
-        # if perimeter == 0:
-        #     return True
-        # 
-        # circularity = 4 * np.pi * area / (perimeter * perimeter)
-        # 
-        # # More lenient circle detection - QR finder patterns can appear circular at angles
-        # if circularity > 0.92:  
-        #     self.add_debug(f"Rejected circular shape: circularity={circularity:.3f}")
-        #     return True
-        # 
-        # return False
+        if perimeter == 0:
+            return True
+        
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        
+        # Stricter circle detection to filter out letters like "O"
+        # QR finder patterns should be square-like, not circular
+        if circularity > 0.85:  # Lowered from 0.92 to catch letter "O"
+            self.add_debug(f"Rejected circular shape: circularity={circularity:.3f}")
+            return True
+        
+        return False
     
     def is_square_like(self, contour) -> bool:
         """Check if contour is square-like with debug info"""
@@ -167,8 +170,8 @@ class EnhancedStrictQRDetector:
         # Combine scores with symmetry analysis
         # Updated scoring with strict concentric validation: Concentric (40%) + Line Pattern (40%) + Symmetry (20%)
         # Concentric validation is now much more strict and reliable, so give it higher weight
-        final_score = (concentric_result['score'] * 0.40 + 
-                      line_pattern_score * 0.40 + 
+        final_score = (concentric_result['score'] * 0.20 + 
+                      line_pattern_score * 0.60 + 
                       symmetry_result['score'] * 0.20)
         
         return {
@@ -188,9 +191,34 @@ class EnhancedStrictQRDetector:
         if len(line_pixels) < 11:
             return {'score': 0.0, 'reason': 'insufficient length', 'direction': direction_name}
         
+        # Check for sufficient contrast to distinguish from letters
+        min_intensity = np.min(line_pixels)
+        max_intensity = np.max(line_pixels)
+        contrast = max_intensity - min_intensity
+        
+        if contrast < 60:  # Insufficient contrast for QR pattern
+            return {
+                'score': 0.0, 
+                'reason': f'insufficient contrast ({contrast})', 
+                'direction': direction_name,
+                'contrast': contrast
+            }
+        
         # Convert to binary with adaptive threshold
         threshold = np.mean(line_pixels)
         binary_line = [0 if p < threshold else 1 for p in line_pixels]
+        
+        # Check dark/light distribution (QR patterns need balanced distribution)
+        dark_count = sum(1 for x in binary_line if x == 0)
+        light_count = sum(1 for x in binary_line if x == 1)
+        
+        # Must have reasonable dark/light balance
+        if dark_count < len(binary_line) * 0.25 or light_count < len(binary_line) * 0.25:
+            return {
+                'score': 0.0,
+                'reason': f'poor dark/light balance (dark:{dark_count/len(binary_line):.2f}, light:{light_count/len(binary_line):.2f})',
+                'direction': direction_name
+            }
         
         # Find runs of consecutive values
         runs = []
@@ -386,14 +414,20 @@ class EnhancedStrictQRDetector:
         # Calculate pattern size from radius (radius is typically half the pattern size)
         estimated_size = radius * 2
         
-        # Improved radius calculation based on pattern size
-        # QR finder patterns typically have: center (1/7), first ring (1/7), second ring (3/7)
-        base_radius = estimated_size // 14  # 1/14 of pattern size for base unit
+        # Improved radius calculation based on QR finder pattern proportions
+        # QR finder pattern structure: center_dark (3/7) -> light_ring (1/7) -> outer_dark (3/7)
+        # Total pattern radius is approximately size/2
+        pattern_radius = estimated_size // 2
         
-        # Calculate rings based on QR finder pattern proportions
-        center_radius = max(2, base_radius)  # Center sampling area
-        first_ring_r = max(4, base_radius * 3)  # First light ring
-        second_ring_r = max(6, base_radius * 6)  # Second dark ring
+        # Calculate radii based on actual QR finder pattern proportions
+        # Center dark region: 0 to 3/7 of pattern radius
+        center_radius = max(2, int(pattern_radius * 3 / 7))
+        
+        # Light ring: sample at 4/7 of pattern radius (middle of light ring)
+        first_ring_r = max(3, int(pattern_radius * 4 / 7))
+        
+        # Dark outer ring: sample at 6/7 of pattern radius (middle of outer dark ring)
+        second_ring_r = max(5, int(pattern_radius * 6 / 7))
         
         # Ensure rings don't exceed image bounds
         max_safe_radius = min(cx, cy, w - cx - 1, h - cy - 1)
@@ -799,6 +833,46 @@ class EnhancedStrictQRDetector:
                         break
         
         return final_patterns
+    
+    def extract_qr_data_if_possible(self, image: np.ndarray, patterns: List[Dict], 
+                                  output_width: int = 300, output_height: Optional[int] = None) -> Optional[Dict]:
+        """
+        Extract pattern data if we have enough patterns (Phase 1: Basic Geometry)
+        
+        Args:
+            image: Original image
+            patterns: Detected finder patterns
+            output_width: Width of output corrected image
+            output_height: Height of output corrected image (calculated from ratio if None)
+            
+        Returns:
+            Pattern data extraction results or None
+        """
+        if len(patterns) < 3:
+            return None
+            
+        print("\n🔮 PATTERN DATA EXTRACTION (Phase 1)")
+        print("=" * 50)
+        
+        # Use data reader to extract pattern with flexible dimensions
+        pattern_result = self.qr_data_reader.extract_qr_data(image, patterns, output_width, output_height)
+        
+        if pattern_result:
+            print("✅ Pattern Data Extraction Successful!")
+            print(f"   Version/Size: {pattern_result['version']}")
+            print(f"   Expected Modules: {pattern_result['expected_modules']}")
+            print(f"   Output Dimensions: {pattern_result['output_dimensions']}")
+            print(f"   Width/Height Ratio: {pattern_result['width_height_ratio']:.2f}")
+            print(f"   Fourth Corner: {pattern_result['fourth_corner']}")
+            
+            # Print debug info from pattern reader
+            for debug_item in pattern_result['debug_info']:
+                print(f"   Debug: {debug_item['message']}")
+                
+        else:
+            print("❌ Pattern Data Extraction Failed")
+            
+        return pattern_result
 
 def process_qr_ratio_finder_with_debug():
     """
@@ -843,6 +917,17 @@ def process_qr_ratio_finder_with_debug():
         patterns, gray, binary_results = detector.find_qr_patterns_multi_threshold(image)
         
         print(f"Found {len(patterns)} potential QR patterns")
+        
+        # Try QR data extraction if we have enough patterns (Phase 1)
+        if len(patterns) >= 3:
+            qr_result = detector.extract_qr_data_if_possible(image, patterns)
+            
+            # Save corrected QR image if extraction was successful
+            if qr_result and 'corrected_image' in qr_result:
+                corrected_filename = f"corrected_{filename}"
+                corrected_path = os.path.join(output_folder, corrected_filename)
+                cv2.imwrite(corrected_path, qr_result['corrected_image'])
+                print(f"💾 Saved corrected QR: {corrected_filename}")
         
         # Create detailed visualization
         result_image = image.copy()

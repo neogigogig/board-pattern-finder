@@ -23,14 +23,20 @@ def check_improved_concentric_structure(binary_image, cx, cy, size) -> Dict:
     if cx < 0 or cx >= w or cy < 0 or cy >= h:
         return {'score': 0.0, 'reason': 'center out of bounds'}
     
-    # Improved radius calculation based on pattern size
-    # QR finder patterns typically have: center (1/7), first ring (1/7), second ring (3/7)
-    base_radius = size // 14  # 1/14 of pattern size for base unit
+    # Improved radius calculation based on QR finder pattern proportions
+    # QR finder pattern structure: center_dark (3/7) -> light_ring (1/7) -> outer_dark (3/7)
+    # Total pattern radius is approximately size/2
+    pattern_radius = size // 2
     
-    # Calculate rings based on QR finder pattern proportions
-    center_radius = max(2, base_radius)  # Center sampling area
-    first_ring_r = max(4, base_radius * 3)  # First light ring
-    second_ring_r = max(6, base_radius * 6)  # Second dark ring
+    # Calculate radii based on actual QR finder pattern proportions
+    # Center dark region: 0 to 3/7 of pattern radius
+    center_radius = max(2, int(pattern_radius * 3 / 7))
+    
+    # Light ring: sample at 4/7 of pattern radius (middle of light ring)
+    first_ring_r = max(3, int(pattern_radius * 4 / 7))
+    
+    # Dark outer ring: sample at 6/7 of pattern radius (middle of outer dark ring)
+    second_ring_r = max(5, int(pattern_radius * 6 / 7))
     
     # Ensure rings don't exceed image bounds
     max_safe_radius = min(cx, cy, w - cx - 1, h - cy - 1)
